@@ -5,6 +5,35 @@ const views = ['upload', 'work', 'done', 'error'];
 const show = (name) => views.forEach((v) => $(`view-${v}`).classList.toggle('hidden', v !== name));
 
 const MAX_MB = 150;
+
+const AFFIRMATIONS = [
+  'one lecture at a time, you\'ve got this ♡',
+  'you are smarter than any exam ✿',
+  'small steps every day add up to big wins',
+  'proud of you for showing up today ♡',
+  'future you is already thankful ✦',
+  'you\'re doing amazing, keep going',
+  'hard topics are just future strengths ✿',
+  'believe in yourself like i believe in you ♡',
+];
+const WORK_LOVE = [
+  'every slide you learn is a step closer ♡',
+  'you can do this ✿',
+  'deep breath, you\'ve got this',
+  'look at you, getting things done ✦',
+  'so proud of you ♡',
+];
+
+function rotate(el, list, ms) {
+  let i = Math.floor(Math.random() * list.length);
+  el.textContent = list[i];
+  return setInterval(() => {
+    el.classList.add('fade');
+    setTimeout(() => { i = (i + 1) % list.length; el.textContent = list[i]; el.classList.remove('fade'); }, 400);
+  }, ms);
+}
+rotate($('affirm'), AFFIRMATIONS, 4200);
+rotate($('work-love'), WORK_LOVE, 2600);
 let result = null;
 
 const PHASES = {
