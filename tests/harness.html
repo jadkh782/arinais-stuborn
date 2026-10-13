@@ -1,0 +1,11 @@
+<!doctype html><meta charset=utf-8><script src="./vendor/jszip.min.js"></script><script type=module>
+import { convertPdf } from './js/converter.js';
+try{
+const f=new File([await (await fetch('./sample.pdf')).blob()],'sample.pdf',{type:'application/pdf'});
+const t0=performance.now();
+const r=await convertPdf(f,()=>{});
+const buf=new Uint8Array(await r.zipBlob.arrayBuffer()); let s=''; for(let i=0;i<buf.length;i+=32768) s+=String.fromCharCode(...buf.subarray(i,i+32768));
+window.RESULT={zip:btoa(s),name:r.zipName,stats:r.stats,ms:Math.round(performance.now()-t0),slides:r.slides.map(x=>[x.index,x.type])};
+}catch(e){window.RESULT={error:String(e.stack||e)}}
+window.DONE=true;
+</script>

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>arinais-stuborn ♡ slides to notion</title>
+  <meta name="description" content="Turn lecture slide PDFs into a Notion page — same wording, same diagrams. Runs 100% in your browser." />
+  <meta name="theme-color" content="#ffd6e7" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Pacifico&family=Quicksand:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <script src="vendor/jszip.min.js" defer></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <div class="sky" aria-hidden="true">
+    <span class="blob b1"></span><span class="blob b2"></span><span class="blob b3"></span>
+    <span class="float f1">♡</span><span class="float f2">✿</span><span class="float f3">✦</span>
+    <span class="float f4">♡</span><span class="float f5">✧</span><span class="float f6">❀</span>
+  </div>
+
+  <header class="top">
+    <a class="brand" href="./" aria-label="arinais-stuborn home">
+      <svg class="bow" viewBox="0 0 64 40" aria-hidden="true">
+        <path d="M32 20 C22 4 4 2 4 14 C4 26 20 30 32 20 Z" />
+        <path d="M32 20 C42 4 60 2 60 14 C60 26 44 30 32 20 Z" />
+        <path class="tail" d="M29 22 L22 38 L28 35 L31 39 Z M35 22 L42 38 L36 35 L33 39 Z" />
+        <circle cx="32" cy="20" r="5.5" />
+      </svg>
+      <span class="wordmark">arinais-stuborn</span>
+    </a>
+    <span class="pill">no AI · no server · just magic ✨</span>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>your slides, <em>notion<h1>your slides, <em>notion-ready</em> ♡</h1>#8209;ready</em> <span class="h-heart">♡</span></h1>
+      <p class="lead">Drop a lecture PDF and get back a zip you can import into Notion. The wording is copied exactly, and the diagrams keep their original look.</p>
+    </section>
+
+    <section class="card" id="card">
+      <!-- upload -->
+      <div class="view" id="view-upload">
+        <label class="drop" id="drop" tabindex="0">
+          <input type="file" id="file" accept="application/pdf,.pdf" hidden />
+          <div class="drop-art" aria-hidden="true">
+            <svg viewBox="0 0 120 110">
+              <path class="heart" d="M60 100 C20 72 6 52 6 34 C6 18 18 6 34 6 C46 6 55 13 60 22 C65 13 74 6 86 6 C102 6 114 18 114 34 C114 52 100 72 60 100 Z" />
+              <path class="arrow" d="M60 72 V36 M46 50 L60 36 L74 50" />
+            </svg>
+          </div>
+          <span class="drop-title">drop your PDF here</span>
+          <span class="drop-sub">or <u>tap to pick one</u> · lecture slides work best</span>
+        </label>
+        <ul class="perks">
+          <li><span>🎀</span> wording stays 1:1</li>
+          <li><span>🖼️</span> diagrams kept as pictures</li>
+          <li><span>🔒</span> your file never leaves this tab</li>
+        </ul>
+      </div>
+
+      <!-- working -->
+      <div class="view hidden" id="view-work" aria-live="polite">
+        <div class="spinner" aria-hidden="true"><span>♡</span></div>
+        <p class="work-title" id="work-title">reading your slides…</p>
+        <div class="bar"><div class="bar-fill" id="bar"></div></div>
+        <p class="work-sub" id="work-sub">&nbsp;</p>
+      </div>
+
+      <!-- done -->
+      <div class="view hidden" id="view-done">
+        <div class="done-head">
+          <div class="done-badge" aria-hidden="true">✿</div>
+          <div>
+            <h2>all done, cutie!</h2>
+            <p class="done-file" id="done-file"></p>
+          </div>
+        </div>
+
+        <div class="chips" id="chips"></div>
+
+        <div class="actions">
+          <button class="btn primary" id="btn-download">download zip ♡</button>
+          <button class="btn ghost" id="btn-again">convert another</button>
+        </div>
+
+        <details class="steps" open>
+          <summary>how to import into notion</summary>
+          <ol>
+            <li>In Notion, click <b>Import</b> (sidebar, at the bottom, or in Settings).</li>
+            <li>Choose <b>Markdown &amp; CSV</b>.</li>
+            <li>Select the <b>.zip</b> you just downloaded. Use the zip itself, not the .md inside it, or the pictures won't come along.</li>
+          </ol>
+        </details>
+
+        <h3 class="sub-h">your slides</h3>
+        <div class="slides" id="slides"></div>
+
+        <details class="md">
+          <summary>peek at the markdown</summary>
+          <div class="md-tools"><button class="btn tiny" id="btn-copy">copy</button></div>
+          <pre id="md-out"></pre>
+        </details>
+      </div>
+
+      <!-- error -->
+      <div class="view hidden" id="view-error">
+        <div class="oops" aria-hidden="true">( ˘︹˘ )</div>
+        <h2>oh no, that didn't work</h2>
+        <p class="err" id="err-msg"></p>
+        <button class="btn primary" id="btn-retry">try another file</button>
+      </div>
+    </section>
+
+    <section class="how">
+      <h2>how it works</h2>
+      <div class="how-grid">
+        <article>
+          <span class="num">1</span>
+          <h3>reads every slide</h3>
+          <p>Text, fonts, colours and shapes are read straight from the PDF, so nothing is guessed or rewritten.</p>
+        </article>
+        <article>
+          <span class="num">2</span>
+          <h3>keeps text as text</h3>
+          <p>Headings, bullets, numbered lists and tables become real Notion blocks. Red or underlined words become <b>bold</b>.</p>
+        </article>
+        <article>
+          <span class="num">3</span>
+          <h3>keeps diagrams as pictures</h3>
+          <p>Boxes, arrows, charts and icons are cut out as clean images. The logo, footer and page numbers are left out.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    made with <span class="beat">♡</span> · arinais-stuborn · everything runs in your browser
+  </footer>
+</body>
+</html>
