@@ -9,10 +9,13 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Pacifico&family=Quicksand:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Pacifico&family=Quicksand:wght@400;500;600;700&family=Caveat:wght@400;700&family=Gaegu:wght@400;700&family=Patrick+Hand&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
   <script src="vendor/jszip.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" defer></script>
   <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/notes.js"></script>
 </head>
 <body>
   <div class="sky" aria-hidden="true">
@@ -34,6 +37,12 @@
   </header>
 
   <main>
+    <nav class="tabs" role="tablist" aria-label="tools">
+      <a class="tab-btn" role="tab" href="#slides" id="tabbtn-slides" aria-selected="true">slides → notion ✿</a>
+      <a class="tab-btn" role="tab" href="#notes" id="tabbtn-notes" aria-selected="false">notes → cute pdf ♡</a>
+    </nav>
+
+    <div class="tab" id="tab-slides">
     <section class="hero">
       <p class="love">because your success makes me the proudest <span class="h-heart">♡</span></p>
       <h1>your slides, <em class="nowrap">notion-ready</em> <span class="h-heart">♡</span></h1>
@@ -134,6 +143,120 @@
         </article>
       </div>
     </section>
+    </div>
+
+    <div class="tab hidden" id="tab-notes">
+      <section class="hero">
+        <p class="love">your handwriting, but make it cute <span class="h-heart">♡</span></p>
+        <h1>your notes, <em class="nowrap">pretty &amp; ready</em> <span class="h-heart">♡</span></h1>
+        <p class="lead">Snap a photo of your handwritten notes and get them back in a cute handwriting font on pretty paper, as a PDF and as a Notion page. Your photos stay on your phone.</p>
+        <p class="cheer">look how far you've come ✿</p>
+      </section>
+
+      <section class="card">
+        <!-- pick -->
+        <div class="view" id="n-pick">
+          <input type="file" id="n-camera" accept="image/*" capture="environment" hidden />
+          <input type="file" id="n-files" accept="image/*" multiple hidden />
+          <div class="pick">
+            <button class="pick-btn" type="button" id="n-camera-btn">
+              <span class="pick-ico" aria-hidden="true">📷</span>
+              <span class="pick-title">scan with camera</span>
+              <span class="pick-sub">one page at a time</span>
+            </button>
+            <button class="pick-btn" type="button" id="n-files-btn">
+              <span class="pick-ico" aria-hidden="true">🖼️</span>
+              <span class="pick-title">pick photos</span>
+              <span class="pick-sub">choose a few pages at once</span>
+            </button>
+          </div>
+          <p class="pick-alt"><button class="link" type="button" id="n-type">or just type your notes ✎</button></p>
+          <p class="affirm">neat print reads best, and you can fix anything i misread ♡</p>
+        </div>
+
+        <!-- working -->
+        <div class="view hidden" id="n-work" aria-live="polite">
+          <div class="spinner" aria-hidden="true"><span>♡</span></div>
+          <p class="work-title" id="n-work-title">reading your handwriting…</p>
+          <div class="bar"><div class="bar-fill" id="n-bar"></div></div>
+          <p class="work-sub" id="n-work-sub">&nbsp;</p>
+          <p class="work-love">you wrote all of this, and it's adorable ♡</p>
+        </div>
+
+        <!-- edit -->
+        <div class="view hidden" id="n-edit">
+          <div class="done-head">
+            <div class="done-badge" aria-hidden="true">✿</div>
+            <div>
+              <h2>make it cute</h2>
+              <p class="done-love">fix anything i misread, then download ♡</p>
+            </div>
+          </div>
+
+          <div class="thumbs" id="n-thumbs"></div>
+          <p class="done-love n-empty hidden" id="n-empty">i couldn't make out any words this time, so type them here ♡</p>
+
+          <label class="n-label" for="n-text">your notes</label>
+          <textarea id="n-text" class="n-text" rows="12" placeholder="# biology&#10;## cells&#10;- the nucleus holds the DNA&#10;[ ] learn the diagram&#10;> this is on the exam!"></textarea>
+          <p class="n-hint"><code># title</code> <code>## heading</code> <code>- bullet</code> <code>1. number</code> <code>[ ] to-do</code> <code>&gt; sticky note</code> <code>**highlight**</code></p>
+
+          <div class="n-opt"><span class="n-label">paper</span><div class="chips n-chips" id="n-themes"></div></div>
+          <div class="n-opt"><span class="n-label">handwriting</span><div class="chips n-chips" id="n-fonts"></div></div>
+
+          <div class="actions">
+            <button class="btn primary" type="button" id="n-pdf">download cute pdf ♡</button>
+            <button class="btn ghost" type="button" id="n-zip">notion zip ✿</button>
+          </div>
+          <div class="actions n-small">
+            <button class="btn tiny" type="button" id="n-add">+ add a page</button>
+            <button class="btn tiny" type="button" id="n-shuffle">✨ new doodles</button>
+            <button class="btn tiny" type="button" id="n-again">start over</button>
+          </div>
+
+          <h3 class="sub-h">preview</h3>
+          <div class="pages" id="n-pages"></div>
+
+          <details class="steps">
+            <summary>how to import into notion</summary>
+            <ol>
+              <li>In Notion, click <b>Import</b> (sidebar, at the bottom, or in Settings).</li>
+              <li>Choose <b>Markdown &amp; CSV</b>.</li>
+              <li>Select the <b>.zip</b> you just downloaded. Use the zip itself, not the .md inside it, or the pictures won't come along.</li>
+            </ol>
+          </details>
+        </div>
+
+        <!-- error -->
+        <div class="view hidden" id="n-error">
+          <div class="oops" aria-hidden="true">( ˘︹˘ )</div>
+          <h2>oh no, that didn't work</h2>
+          <p class="done-love">not your fault. tiny bumps don't stop you ♡</p>
+          <p class="err" id="n-err-msg"></p>
+          <button class="btn primary" type="button" id="n-retry">try again</button>
+        </div>
+      </section>
+
+      <section class="how">
+        <h2>how it works</h2>
+        <div class="how-grid">
+          <article>
+            <span class="num">1</span>
+            <h3>snap your page</h3>
+            <p>Take a photo of your notes or pick a few from your gallery. Good light and neat print read best.</p>
+          </article>
+          <article>
+            <span class="num">2</span>
+            <h3>fix the words</h3>
+            <p>Your phone reads the handwriting itself, so your photos are never uploaded. Correct anything it misread.</p>
+          </article>
+          <article>
+            <span class="num">3</span>
+            <h3>get it cute</h3>
+            <p>Pick a paper and a handwriting font, then download a <b>PDF</b> or a <b>Notion zip</b>, with hearts on every page.</p>
+          </article>
+        </div>
+      </section>
+    </div>
   </main>
 
   <footer class="foot">

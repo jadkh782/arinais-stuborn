@@ -135,8 +135,19 @@ drop.addEventListener('drop', (e) => handle(e.dataTransfer.files[0]));
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => {
   e.preventDefault();
-  if (!$('view-upload').classList.contains('hidden') && e.dataTransfer?.files?.[0]) handle(e.dataTransfer.files[0]);
+  if (!$('tab-slides').classList.contains('hidden') && !$('view-upload').classList.contains('hidden') && e.dataTransfer?.files?.[0]) handle(e.dataTransfer.files[0]);
 });
+
+// ----- tabs: #notes shows the handwriting tab, anything else the slides tab -----
+function showTab() {
+  const notes = location.hash === '#notes';
+  $('tab-slides').classList.toggle('hidden', notes);
+  $('tab-notes').classList.toggle('hidden', !notes);
+  $('tabbtn-slides').setAttribute('aria-selected', String(!notes));
+  $('tabbtn-notes').setAttribute('aria-selected', String(notes));
+}
+window.addEventListener('hashchange', showTab);
+showTab();
 
 $('btn-download').addEventListener('click', () => result && download(result.zipBlob, result.zipName));
 $('btn-again').addEventListener('click', () => { result = null; show('upload'); });

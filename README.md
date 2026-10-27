@@ -17,6 +17,18 @@ Everything runs in the browser: no AI, no server, and the PDF never leaves the v
    - empty slides → `*(Folie N – leer)*`.
 5. You get back **`<name>_Notion.zip`** containing `<name>.md` and an `images/` folder. In Notion, go to **Import → Markdown & CSV** and pick the zip.
 
+## Notes → cute PDF (second tab, `#notes`)
+
+1. **Scan or pick** photos of handwritten notes (the camera button opens the phone camera), or just type.
+2. The handwriting is read **on the device** with [Tesseract.js](https://tesseract.projectnaptha.com/) 5 (English + German). Photos are never uploaded; only the reader's code and language data are downloaded from jsDelivr the first time.
+3. She fixes anything it misread in a small markdown editor: `# title`, `## heading`, `- bullet`, `1. number`, `[ ] to-do`, `> sticky note`, `**highlight**`.
+4. She picks a paper (strawberry milk, lavender dream, peach blossom) and a handwriting font (Caveat, Gaegu, Patrick Hand). A live preview shows the A4 pages, with washi tape, doodles, a motivational sticker and a footer on each one.
+5. Downloads:
+   - **`<title> ♡.pdf`**, made with jsPDF
+   - **`<title>_Notion.zip`**: the editable text plus the cute pages as `images/page-NN.jpg`, imported the same way as the slides zip
+
+Neat print reads well. Cursive often needs fixing by hand, which is what the editor is for.
+
 ## Project layout
 
 ```
@@ -25,7 +37,9 @@ public/              ← the website (static, no build step)
   css/style.css
   js/app.js          ← UI: upload, progress, results, download
   js/converter.js    ← the deterministic PDF → Notion converter
+  js/notes.js        ← notes tab: on-device handwriting reading, cute pages, PDF + Notion zip
   vendor/            ← pdf.js 4.10 + JSZip 3.10 (self-hosted, no CDN needed)
+                       (the notes tab loads tesseract.js 5.1.1 + jsPDF 2.5.2 from jsDelivr)
 tests/
   harness.html       ← runs the converter on tests/…/sample.pdf
   run_harness.py     ← headless-Chrome test: python tests/run_harness.py slides.pdf out/
@@ -56,4 +70,4 @@ vercel --prod   # production
 ```
 
 ## Licences
-pdf.js: Apache-2.0 (see `public/vendor/PDFJS-LICENSE`). JSZip: MIT.
+pdf.js: Apache-2.0 (see `public/vendor/PDFJS-LICENSE`). JSZip: MIT. Tesseract.js: Apache-2.0. jsPDF: MIT. Fonts: SIL Open Font License (Google Fonts).
