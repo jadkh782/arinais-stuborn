@@ -20,14 +20,16 @@ Everything runs in the browser: no AI, no server, and the PDF never leaves the v
 ## Notes → cute PDF (second tab, `#notes`)
 
 1. **Scan or pick** photos of handwritten notes (the camera button opens the phone camera), or just type.
-2. The handwriting is read **on the device** with [Tesseract.js](https://tesseract.projectnaptha.com/) 5 (English + German). Photos are never uploaded; only the reader's code and language data are downloaded from jsDelivr the first time.
-3. She fixes anything it misread in a small markdown editor: `# title`, `## heading`, `- bullet`, `1. number`, `[ ] to-do`, `> sticky note`, `**highlight**`.
-4. She picks a paper (strawberry milk, lavender dream, peach blossom) and a handwriting font (Caveat, Gaegu, Patrick Hand). A live preview shows the A4 pages, with washi tape, doodles, a motivational sticker and a footer on each one.
+2. The handwriting **and maths** are read **on the device** by [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) (0.9B, MIT), run on the GPU with [Transformers.js](https://huggingface.co/docs/transformers.js) 4 + WebGPU (`onnx-community/GLM-OCR-ONNX`, 4-bit). Photos are never uploaded.
+   - Each photo is scaled to 1000 px wide and read in strips of ≤ 0.4 MP, cut at the emptiest rows, which keeps GPU memory small (phones) and steps short (weak GPUs). Blank strips are skipped.
+   - Formulas come back as LaTeX (`$…$` / `$$…$$`).
+   - The model (~800 MB) is downloaded from Hugging Face's CDN the first time and cached by the browser; it's freed after each scan and reloads from the cache. It can't live on Vercel: Hobby uploads are capped at 100 MB per file and functions have no GPU.
+   - Fallback: [Tesseract.js](https://tesseract.projectnaptha.com/) 5 (English + German, text only) when the browser has no WebGPU (needs Safari 26 / Chrome), when the download fails twice, or when the GPU gives up. A note in the editor says so.
+3. She fixes anything it misread in a small markdown editor: `# title`, `## heading`, `- bullet`, `1. number`, `[ ] to-do`, `> sticky note`, `**highlight**`, `$x^2$`, `$$ formula $$` (a line that is a single `$…$` formula counts as a block).
+4. She picks a paper (strawberry milk, lavender dream, peach blossom) and a handwriting font (Caveat, Gaegu, Patrick Hand). A live preview shows the A4 pages, with washi tape, doodles, a motivational sticker and a footer on each one. Formulas are typeset by [MathJax](https://www.mathjax.org/) 3 (loaded only when there is maths); its SVG paths are drawn straight onto the canvas in the ink colour, block formulas on a soft card.
 5. Downloads:
    - **`<title> ♡.pdf`**, made with jsPDF
-   - **`<title>_Notion.zip`**: the editable text plus the cute pages as `images/page-NN.jpg`, imported the same way as the slides zip
-
-Neat print reads well. Cursive often needs fixing by hand, which is what the editor is for.
+   - **`<title>_Notion.zip`**: the editable text (formulas as `$…$` / `$$` blocks) plus the cute pages as `images/page-NN.jpg`, imported the same way as the slides zip
 
 ## Project layout
 
@@ -37,9 +39,10 @@ public/              ← the website (static, no build step)
   css/style.css
   js/app.js          ← UI: upload, progress, results, download
   js/converter.js    ← the deterministic PDF → Notion converter
-  js/notes.js        ← notes tab: on-device handwriting reading, cute pages, PDF + Notion zip
+  js/notes.js        ← notes tab: on-device handwriting + maths reading, cute pages, PDF + Notion zip
   vendor/            ← pdf.js 4.10 + JSZip 3.10 (self-hosted, no CDN needed)
-                       (the notes tab loads tesseract.js 5.1.1 + jsPDF 2.5.2 from jsDelivr)
+                       (the notes tab loads tesseract.js 5.1.1, jsPDF 2.5.2, Transformers.js 4.3.1 and
+                        MathJax 3.2.2 from jsDelivr, and the GLM-OCR model from Hugging Face)
 tests/
   harness.html       ← runs the converter on tests/…/sample.pdf
   run_harness.py     ← headless-Chrome test: python tests/run_harness.py slides.pdf out/
@@ -70,4 +73,4 @@ vercel --prod   # production
 ```
 
 ## Licences
-pdf.js: Apache-2.0 (see `public/vendor/PDFJS-LICENSE`). JSZip: MIT. Tesseract.js: Apache-2.0. jsPDF: MIT. Fonts: SIL Open Font License (Google Fonts).
+pdf.js: Apache-2.0 (see `public/vendor/PDFJS-LICENSE`). JSZip: MIT. Tesseract.js: Apache-2.0. jsPDF: MIT. Transformers.js: Apache-2.0. GLM-OCR: MIT. MathJax: Apache-2.0. Fonts: SIL Open Font License (Google Fonts).

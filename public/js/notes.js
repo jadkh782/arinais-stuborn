@@ -1,6 +1,7 @@
 // arinais-stuborn — handwritten notes → cute PDF + Notion zip.
-// The handwriting is read on the device with Tesseract.js (photos are never uploaded).
-// Pages are laid out once, drawn on canvas, and saved with jsPDF / JSZip.
+// The handwriting (and maths) is read on the device by GLM-OCR on the GPU, with Tesseract.js as the
+// fallback; photos are never uploaded. Pages are laid out once, drawn on canvas (formulas via MathJax),
+// and saved with jsPDF / JSZip.
 
 const $ = (id) => document.getElementById(id);
 const views = ['pick', 'work', 'edit', 'error'];
@@ -139,22 +140,225 @@ function linesOf(data) {
   return String(data.text || '').split('\n').map((text) => ({ text, confidence: 100, bbox: null }));
 }
 
-async function readPages(files, onProgress) {
+// quick reader: one page with Tesseract
+async function tessPage(src, i, total, onProgress) {
   report = (m) => { if (m.status !== 'recognizing text') onProgress({ phase: 'load' }); };
-  onProgress({ phase: 'load' });
   const worker = await getWorker();
-  const pages = [];
-  for (let i = 0; i < files.length; i++) {
-    const src = await loadImage(files[i]);
-    const canvas = prepare(src);
-    if (src.close) src.close();
-    report = (m) => { if (m.status === 'recognizing text') onProgress({ phase: 'read', done: i + (m.progress || 0), total: files.length }); };
-    onProgress({ phase: 'read', done: i, total: files.length });
-    const { data } = await worker.recognize(canvas);
-    pages.push(linesOf(data));
-    canvas.width = canvas.height = 0;
+  const canvas = prepare(src);
+  report = (m) => { if (m.status === 'recognizing text') onProgress({ phase: 'read', done: i + (m.progress || 0), total }); };
+  onProgress({ phase: 'read', done: i, total });
+  const { data } = await worker.recognize(canvas);
+  canvas.width = canvas.height = 0;
+  const md = toMarkdown([linesOf(data)]).trim();
+  return i ? md.replace(/^# /gm, '## ') : md; // only the first page gets a title
+}
+
+// smart reader: GLM-OCR (0.9B vision-language OCR model) on the GPU via Transformers.js + WebGPU.
+// It reads text and formulas (as LaTeX). The ~800 MB model comes from Hugging Face the first time
+// and is cached by the browser after that.
+const TJS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.min.js';
+const GLM = 'onnx-community/GLM-OCR-ONNX';
+const GLM_BYTES = 7.8e8; // download size, so the progress bar doesn't jump back as files start
+const PAGE_W = 1000; // photos are scaled to this width…
+const STRIP_PX = 4e5; // …and read in strips of at most this many pixels, which keeps GPU memory small
+let glmPromise = null;
+let glmReport = () => {};
+let glmBroken = false; // the GPU gave up; ONNX Runtime can't recover in the same page
+let glmLoadFails = 0;
+
+async function gpuAdapter() {
+  try { return navigator.gpu ? await navigator.gpu.requestAdapter() : null; } catch { return null; }
+}
+
+function getGlm() {
+  if (!glmPromise) {
+    glmPromise = (async () => {
+      const adapter = await gpuAdapter();
+      if (!adapter) throw new Error('no-webgpu');
+      const T = await import(TJS);
+      T.env.allowLocalModels = false;
+      const seen = {};
+      const progress_callback = (p) => {
+        if (p.status !== 'progress' || !p.total) return;
+        seen[p.file] = [p.loaded, p.total];
+        const v = Object.values(seen);
+        glmReport(v.reduce((a, [l]) => a + l, 0) / Math.max(GLM_BYTES, v.reduce((a, [, n]) => a + n, 0)));
+      };
+      const processor = await T.AutoProcessor.from_pretrained(GLM, { progress_callback });
+      // 4-bit vision encoder + decoder; the 4-bit embeddings don't load, so fp16 ones where the GPU has fp16
+      const dtype = adapter.features.has('shader-f16')
+        ? { embed_tokens: 'fp16', vision_encoder: 'q4f16', decoder_model_merged: 'q4f16' }
+        : { embed_tokens: 'quantized', vision_encoder: 'q4', decoder_model_merged: 'q4' };
+      const model = await T.AutoModelForImageTextToText.from_pretrained(GLM, {
+        device: 'webgpu', dtype, use_external_data_format: true, progress_callback,
+      });
+      navigator.storage?.persist?.().catch(() => {}); // ask the browser to keep the cached model
+      return { T, processor, model };
+    })().catch((e) => { glmPromise = null; throw e; });
   }
-  return toMarkdown(pages);
+  return glmPromise;
+}
+
+// scale the photo, then cut it into strips at the emptiest rows so no line of writing is cut in half;
+// strips that are just paper are dropped
+function strips(src) {
+  const k = Math.min(1, PAGE_W / src.width);
+  const w = Math.max(1, Math.round(src.width * k));
+  const h = Math.max(1, Math.round(src.height * k));
+  const page = document.createElement('canvas');
+  page.width = w;
+  page.height = h;
+  const ctx = page.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(src, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+
+  // ink per row: pixels clearly darker than that row's paper (its 90th-percentile brightness)
+  const ink = new Float32Array(h);
+  const hist = new Uint32Array(256);
+  const row = new Uint8Array(w);
+  for (let y = 0; y < h; y++) {
+    hist.fill(0);
+    for (let x = 0, i = y * w * 4; x < w; x++, i += 4) {
+      const v = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0;
+      row[x] = v;
+      hist[v]++;
+    }
+    let n = 0;
+    let paperV = 255;
+    for (let v = 0; v < 256; v++) { n += hist[v]; if (n >= w * 0.9) { paperV = v; break; } }
+    let c = 0;
+    for (let x = 0; x < w; x++) if (row[x] < paperV - 50) c++;
+    ink[y] = c;
+  }
+  const sm = new Float32Array(h); // smoothed, so cuts keep clear of ascenders and descenders
+  for (let y = 0; y < h; y++) {
+    let s = 0;
+    for (let j = Math.max(0, y - 4); j <= Math.min(h - 1, y + 4); j++) s += ink[j];
+    sm[y] = s;
+  }
+
+  const rows = Math.max(120, Math.floor(STRIP_PX / w));
+  const cuts = [0];
+  while (h - cuts[cuts.length - 1] > rows) {
+    const from = cuts[cuts.length - 1];
+    let best = from + rows;
+    for (let y = from + rows; y >= from + Math.floor(rows * 0.6); y--) if (sm[y] < sm[best]) best = y;
+    cuts.push(best);
+  }
+  cuts.push(h);
+
+  const out = [];
+  for (let s = 0; s + 1 < cuts.length; s++) {
+    const y0 = cuts[s];
+    const y1 = cuts[s + 1];
+    let c = 0;
+    for (let y = y0; y < y1; y++) c += ink[y];
+    if (c < w * (y1 - y0) * 0.001) continue;
+    const part = document.createElement('canvas');
+    part.width = w;
+    part.height = y1 - y0;
+    part.getContext('2d').drawImage(page, 0, y0, w, y1 - y0, 0, 0, w, y1 - y0);
+    out.push(part);
+  }
+  page.width = page.height = 0;
+  return out;
+}
+
+// model output → the editor's markdown: \[ \] and \( \) become $$ $$ and $ $, checkboxes become [ ],
+// and a line the model got stuck repeating is kept at most twice
+function tidy(s) {
+  const t = String(s).replace(/\r/g, '')
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m.trim()}\n$$\n`)
+    .replace(/\\\((.+?)\\\)/g, (_, m) => `$${m.trim()}$`)
+    .replace(/^\s*[☐□]\s*/gmu, '[ ] ')
+    .replace(/^\s*[☑☒✓✔]\s*/gmu, '[x] ');
+  const out = [];
+  for (const line of t.split('\n')) {
+    const n = out.length;
+    if (line.trim() && n >= 2 && out[n - 1] === line && out[n - 2] === line) continue;
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+async function glmPage({ T, processor, model }, src, onPart) {
+  const parts = strips(src);
+  const prompt = processor.apply_chat_template(
+    [{ role: 'user', content: [{ type: 'image' }, { type: 'text', text: 'Text Recognition:' }] }],
+    { add_generation_prompt: true },
+  );
+  const out = [];
+  for (let s = 0; s < parts.length; s++) {
+    onPart(s / parts.length);
+    const inputs = await processor(prompt, await T.RawImage.fromCanvas(parts[s]));
+    let n = 0;
+    const streamer = new T.TextStreamer(processor.tokenizer, {
+      skip_prompt: true, skip_special_tokens: true,
+      callback_function: () => onPart((s + Math.min(0.95, ++n / 300)) / parts.length),
+    });
+    const ids = await model.generate({ ...inputs, max_new_tokens: 1024, do_sample: false, streamer });
+    parts[s].width = parts[s].height = 0;
+    const text = tidy(processor.batch_decode(ids.slice(null, [inputs.input_ids.dims.at(-1), null]), { skip_special_tokens: true })[0]);
+    if (text) out.push(text);
+  }
+  return out.join('\n\n');
+}
+
+// smart reader when the browser can run it, quick reader otherwise (or when the GPU gives up);
+// notes says which fallbacks happened, for a friendly line in the editor
+async function readPages(files, onProgress) {
+  const notes = new Set();
+  let reader = null;
+  if (glmBroken) notes.add('gpu');
+  else {
+    glmReport = (done) => onProgress({ phase: 'download', done });
+    onProgress({ phase: 'load' });
+    try {
+      reader = await getGlm();
+      glmLoadFails = 0;
+    } catch (e) {
+      if (e.message === 'no-webgpu') notes.add('basic');
+      else {
+        console.error(e);
+        if (++glmLoadFails < 2) throw new Error('smart-missing'); // most likely an interrupted download
+        notes.add('offline');
+      }
+    }
+  }
+  const out = [];
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const src = await loadImage(files[i]);
+      try {
+        if (reader) {
+          try {
+            onProgress({ phase: 'read', done: i, total: files.length });
+            out.push(await glmPage(reader, src, (f) => onProgress({ phase: 'read', done: i + f, total: files.length })));
+            continue;
+          } catch (e) {
+            console.error(e);
+            glmBroken = true;
+            reader = null;
+            glmPromise = null;
+            notes.add('gpu');
+          }
+        }
+        out.push(await tessPage(src, i, files.length, onProgress));
+      } finally {
+        if (src.close) src.close();
+      }
+    }
+  } finally {
+    // free the GPU memory while she edits; the next scan loads the model again from the browser cache
+    if (reader) {
+      glmPromise = null;
+      Promise.resolve(reader.model.dispose()).catch(() => {});
+    }
+  }
+  const md = out.filter(Boolean).join('\n\n');
+  return { md: md ? `${md}\n` : '', notes };
 }
 
 // ---------- 2. lines → markdown ----------
@@ -201,11 +405,29 @@ function parse(md) {
   const blocks = [];
   let para = null;
   let note = null;
+  let math = null; // an open $$ … $$ block
   for (const raw of String(md).replace(/\r/g, '').split('\n')) {
     const t = raw.trim();
     const level = raw.length - raw.trimStart().length >= 2 ? 1 : 0;
     let m;
+    if (math) {
+      if (t.endsWith('$$')) { math.lines.push(t.slice(0, -2)); math = null; } else math.lines.push(t);
+      continue;
+    }
     if (!t) { para = note = null; continue; }
+    // formulas: $$ … $$ (one line or several), or a line that is a single $ … $ formula
+    if (t.startsWith('$$')) {
+      para = note = null;
+      const rest = t.slice(2);
+      if (rest.length >= 2 && rest.endsWith('$$')) blocks.push({ k: 'math', lines: [rest.slice(0, -2)] });
+      else { math = { k: 'math', lines: [rest] }; blocks.push(math); }
+      continue;
+    }
+    if ((m = /^\$(?!\s)([^$]*[^\s$])\$$/.exec(t))) {
+      para = note = null;
+      blocks.push({ k: 'math', lines: [m[1]] });
+      continue;
+    }
     if ((m = /^>\s?(.*)$/.exec(t))) {
       if (note) note.lines.push(m[1]);
       else { note = { k: 'note', lines: [m[1]] }; blocks.push(note); }
@@ -226,11 +448,122 @@ function parse(md) {
     }
     para = null;
   }
-  return blocks;
+  for (const b of blocks) if (b.k === 'math') b.tex = b.lines.join('\n').trim();
+  return blocks.filter((b) => b.k !== 'math' || b.tex);
 }
 
-const runs = (s) => String(s).split('**').map((t, i) => ({ t, hl: i % 2 === 1 })).filter((r) => r.t);
+// text → runs {t, hl, math}: **highlight** and $inline formula$ (a $ next to a digit stays a dollar sign)
+const MATH_RE = /\$(?!\s)([^$\n]*?[^\s$])\$(?!\d)/g;
+function runs(s) {
+  const out = [];
+  String(s).split('**').forEach((part, i) => {
+    const hl = i % 2 === 1;
+    let last = 0;
+    for (const m of part.matchAll(MATH_RE)) {
+      if (m.index > last) out.push({ t: part.slice(last, m.index), hl });
+      out.push({ t: m[1], hl, math: true });
+      last = m.index + m[0].length;
+    }
+    if (last < part.length) out.push({ t: part.slice(last), hl });
+  });
+  return out.filter((r) => r.t);
+}
 const plain = (s) => String(s).replace(/\*\*/g, '').trim();
+
+// ---------- formulas: MathJax turns TeX into SVG paths, which are drawn straight onto the canvas ----------
+// (drawing the paths, not an <img> of the SVG, keeps them sharp at any scale and keeps the canvas exportable)
+const MATH_EM = 0.8; // formula size relative to the handwriting font
+let mathReady = null;
+const mathCache = new Map();
+
+function loadMath() {
+  if (!mathReady) {
+    mathReady = new Promise((resolve, reject) => {
+      window.MathJax = { startup: { typeset: false }, svg: { fontCache: 'none' } };
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js';
+      s.async = true;
+      s.onload = () => window.MathJax.startup.promise.then(resolve, reject);
+      s.onerror = () => reject(new Error('math-missing'));
+      document.head.appendChild(s);
+    }).catch((e) => { mathReady = null; throw e; });
+  }
+  return mathReady;
+}
+
+// turn every formula into a shape {svg, x, y, w, h} (viewBox units: 1/1000 em, baseline at y = 0);
+// a formula MathJax can't read stays null and is shown as written
+async function prepareMath(items) {
+  if (!items.length) return;
+  try { await loadMath(); } catch { return; }
+  if (mathCache.size > 400) mathCache.clear();
+  await Promise.all(items.map(async ([tex, display]) => {
+    const key = `${display ? 'D' : 'I'}${tex}`;
+    if (mathCache.has(key)) return;
+    let shape = null;
+    try {
+      const svg = (await window.MathJax.tex2svgPromise(tex, { display })).querySelector('svg');
+      const vb = svg && (svg.getAttribute('viewBox') || '').split(/[\s,]+/).map(Number);
+      if (vb && vb.length === 4 && vb[2] > 0 && !svg.querySelector('[data-mml-node="merror"]')) {
+        shape = { svg, x: vb[0], y: vb[1], w: vb[2], h: vb[3] };
+      }
+    } catch { /* stays null */ }
+    mathCache.set(key, shape);
+  }));
+}
+const texShape = (tex, display) => mathCache.get(`${display ? 'D' : 'I'}${tex}`) || null;
+
+function svgTransform(c, tr) {
+  if (!tr) return;
+  for (const [, fn, args] of tr.matchAll(/(\w+)\s*\(([^)]*)\)/g)) {
+    const a = args.split(/[\s,]+/).filter(Boolean).map(Number);
+    if (fn === 'translate') c.translate(a[0] || 0, a[1] || 0);
+    else if (fn === 'scale') c.scale(a[0], a.length > 1 ? a[1] : a[0]);
+    else if (fn === 'matrix' && a.length === 6) c.transform(...a);
+    else if (fn === 'rotate') c.rotate(((a[0] || 0) * Math.PI) / 180);
+  }
+}
+
+// paint MathJax's SVG in the current fill colour; fill="none" shapes (boxes, lines) are stroked
+function drawSvg(c, node) {
+  for (const el of node.children) {
+    const tag = el.tagName.toLowerCase();
+    const num = (n) => parseFloat(el.getAttribute(n)) || 0;
+    const stroked = el.getAttribute('fill') === 'none';
+    c.save();
+    svgTransform(c, el.getAttribute('transform'));
+    if (stroked || tag === 'line') {
+      c.strokeStyle = c.fillStyle;
+      c.lineWidth = num('stroke-width') || 40;
+    }
+    if (tag === 'g') drawSvg(c, el);
+    else if (tag === 'svg') { c.translate(num('x'), num('y')); drawSvg(c, el); }
+    else if (tag === 'path' && el.getAttribute('d')) {
+      const p = new Path2D(el.getAttribute('d'));
+      if (stroked) c.stroke(p); else c.fill(p);
+    } else if (tag === 'rect') {
+      if (stroked) c.strokeRect(num('x'), num('y'), num('width'), num('height'));
+      else c.fillRect(num('x'), num('y'), num('width'), num('height'));
+    } else if (tag === 'line') {
+      c.beginPath();
+      c.moveTo(num('x1'), num('y1'));
+      c.lineTo(num('x2'), num('y2'));
+      c.stroke();
+    } else if (tag === 'text') {
+      c.font = `${el.getAttribute('font-style') || ''} ${el.getAttribute('font-weight') || ''} ${num('font-size') || 1000}px ${el.getAttribute('font-family') || 'serif'}`.trim();
+      c.fillText(el.textContent, num('x'), num('y'));
+    }
+    c.restore();
+  }
+}
+
+function drawMath(c, shape, x, base, k) {
+  c.save();
+  c.translate(x - shape.x * k, base);
+  c.scale(k, k);
+  drawSvg(c, shape.svg);
+  c.restore();
+}
 
 // ---------- 4. layout + drawing ----------
 const W = 794;
@@ -364,10 +697,16 @@ function paper(c, t) {
   }
 }
 
-// greedy word wrap; returns lines of segments {t, hl, sp, x, w}
-function wrap(ctx, parts, max) {
+// greedy word wrap; returns lines of segments {t, hl, sp, x, w} (+ shape, k for formulas);
+// em is the font size, used to size formulas (0: formulas are shown as written)
+function wrap(ctx, parts, max, em = 0) {
   const toks = [];
-  for (const r of parts) for (const p of r.t.split(/(\s+)/)) if (p) toks.push({ t: p, hl: r.hl, sp: /^\s+$/.test(p) });
+  for (const r of parts) {
+    const shape = r.math && em ? texShape(r.t, false) : null;
+    if (shape) { toks.push({ t: r.t, hl: r.hl, shape }); continue; }
+    const t = r.math ? `$${r.t}$` : r.t;
+    for (const p of t.split(/(\s+)/)) if (p) toks.push({ t: p, hl: r.hl, sp: /^\s+$/.test(p) });
+  }
   const lines = [];
   let cur = [];
   let x = 0;
@@ -382,6 +721,14 @@ function wrap(ctx, parts, max) {
       if (!cur.length) continue;
       const w = ctx.measureText(' ').width;
       cur.push({ t: ' ', hl: tk.hl, sp: true, x, w });
+      x += w;
+      continue;
+    }
+    if (tk.shape) {
+      const k = Math.min((em * MATH_EM) / 1000, max / tk.shape.w);
+      const w = tk.shape.w * k;
+      if (x + w > max && cur.length) flush();
+      cur.push({ t: tk.t, hl: tk.hl, shape: tk.shape, k, x, w });
       x += w;
       continue;
     }
@@ -423,6 +770,14 @@ async function layout(md, themeKey, fontKey, seed) {
 
   const r = rng(seed);
   const blocks = parse(md);
+  const items = [];
+  for (const b of blocks) {
+    if (b.k === 'math') items.push([b.tex, true]);
+    for (const s of b.k === 'title' || b.k === 'math' ? [] : b.lines || [b.text]) {
+      for (const x of runs(s)) if (x.math) items.push([x.t, false]);
+    }
+  }
+  await prepareMath(items);
   const first = blocks.find((b) => b.k === 'title');
   const title = (first && plain(first.text)) || 'my notes';
   if (!first) blocks.unshift({ k: 'title', text: title });
@@ -438,7 +793,10 @@ async function layout(md, themeKey, fontKey, seed) {
     c.font = font;
     for (const s of segs) if (s.hl) { c.fillStyle = t.hl; rr(c, x + s.x - 2, base - S * 0.6, s.w + 4, S * 0.72, 6); c.fill(); }
     c.fillStyle = ink;
-    for (const s of segs) if (!s.sp) c.fillText(s.t, x + s.x, base);
+    for (const s of segs) {
+      if (s.shape) drawMath(c, s.shape, x + s.x, base, s.k);
+      else if (!s.sp) c.fillText(s.t, x + s.x, base);
+    }
   };
 
   const markerOp = (b, x, my) => (c) => {
@@ -495,7 +853,7 @@ async function layout(md, themeKey, fontKey, seed) {
       y += lines.length * 60 + 52;
     } else if (b.k === 'h') {
       measure.font = bold;
-      const lines = wrap(measure, runs(b.text), CW);
+      const lines = wrap(measure, runs(b.text), CW, S * 1.25);
       if (y > TOP) y += 12;
       need(lines.length * HLH + LH * 2);
       for (const ln of lines) {
@@ -517,18 +875,50 @@ async function layout(md, themeKey, fontKey, seed) {
     } else if (b.k === 'p') {
       measure.font = body;
       for (const src of b.lines) {
-        for (const ln of wrap(measure, runs(src), CW)) {
+        for (const ln of wrap(measure, runs(src), CW, S)) {
           need(LH);
           page.ops.push(textOp(ln, L0, y + LH * 0.72, body, t.ink));
           y += LH;
         }
       }
       y += 8;
+    } else if (b.k === 'math') {
+      const shape = texShape(b.tex, true);
+      if (!shape) { // MathJax couldn't load or read it: show the formula as written
+        measure.font = body;
+        for (const ln of wrap(measure, [{ t: b.tex, hl: false }], CW)) {
+          need(LH);
+          page.ops.push(textOp(ln, L0, y + LH * 0.72, body, t.ink));
+          y += LH;
+        }
+        y += 8;
+        continue;
+      }
+      // a soft formula card, centred, shrunk to fit the page if it's very wide or tall
+      const k = Math.min((S * 0.95) / 1000, (CW - 56) / shape.w, (BOTTOM - TOP - 60) / shape.h);
+      const w = shape.w * k;
+      const h = shape.h * k;
+      const boxH = Math.max(h + 32, LH + 12);
+      y += 6;
+      need(boxH);
+      const top = y;
+      page.ops.push((c) => {
+        c.globalAlpha = 0.8;
+        c.fillStyle = t.note;
+        rr(c, L0 + 4, top, CW - 8, boxH, 16);
+        c.fill();
+        c.globalAlpha = 1;
+        sparkle(c, L0 + 24, top + 20, 14, t.accent);
+        sparkle(c, R0 - 22, top + boxH - 18, 10, t.accent);
+        c.fillStyle = t.ink;
+        drawMath(c, shape, L0 + (CW - w) / 2, top + (boxH - h) / 2 - shape.y * k, k);
+      });
+      y += boxH + 12;
     } else if (b.k === 'bullet' || b.k === 'num' || b.k === 'todo') {
       const ind = b.level * 28;
       const x = L0 + ind + 34;
       measure.font = body;
-      wrap(measure, runs(b.text), R0 - x).forEach((ln, i) => {
+      wrap(measure, runs(b.text), R0 - x, S).forEach((ln, i) => {
         need(LH);
         const base = y + LH * 0.72;
         if (i === 0) page.ops.push(markerOp(b, L0 + ind + 13, base - S * 0.3));
@@ -538,7 +928,7 @@ async function layout(md, themeKey, fontKey, seed) {
       y += 3;
     } else if (b.k === 'note') {
       measure.font = body;
-      const lines = b.lines.flatMap((src) => wrap(measure, runs(src), CW - 64));
+      const lines = b.lines.flatMap((src) => wrap(measure, runs(src), CW - 64, S));
       let i = 0;
       y += 6;
       while (i < lines.length) {
@@ -653,11 +1043,30 @@ async function buildPdf(md) {
   return { blob: doc.output('blob'), name: `${safeFileName(L.title)} ♡.pdf` };
 }
 
+// her markdown in Notion's dialect: [ ] to-dos become "- [ ]", and a formula on its own line becomes
+// a $$ block (an equation block in Notion); lines inside $$ … $$ are left alone
 function notionMarkdown(md, title, quote, images) {
+  let inMath = false;
   let body = String(md).replace(/\r/g, '')
     .split('\n')
-    .map((l) => l.replace(/^(\s*)\[( |x|X)?\]\s*/, (_, s, x) => `${s}- [${x && x.trim() ? 'x' : ' '}] `))
+    .map((l) => {
+      const t = l.trim();
+      if (inMath) {
+        if (!t.endsWith('$$')) return l;
+        inMath = false;
+        return `${l}\n`;
+      }
+      if (t.startsWith('$$')) {
+        if (t.length >= 4 && t.endsWith('$$')) return `\n$$\n${t.slice(2, -2).trim()}\n$$\n`;
+        inMath = true;
+        return `\n${l}`;
+      }
+      const m = /^\$(?!\s)([^$]*[^\s$])\$$/.exec(t);
+      if (m) return `\n$$\n${m[1]}\n$$\n`;
+      return l.replace(/^(\s*)\[( |x|X)?\]\s*/, (_, s, x) => `${s}- [${x && x.trim() ? 'x' : ' '}] `);
+    })
     .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (!/^#\s/m.test(body)) body = `# ${title}${body ? `\n\n${body}` : ''}`;
   const pics = images.map((fn, i) => `![page ${i + 1}](images/${fn})`).join('\n\n');
@@ -685,10 +1094,17 @@ async function buildZip(md) {
 }
 
 // ---------- 7. UI ----------
-const state = { theme: 'strawberry', font: 'caveat', seed: Math.floor(Math.random() * 1e9), thumbs: [], editing: false };
+const state = { theme: 'strawberry', font: 'caveat', seed: Math.floor(Math.random() * 1e9), thumbs: [], editing: false, retry: null };
 const text = $('n-text');
 
 function setProgress({ phase, done = 0, total = 1 }) {
+  if (phase === 'download') {
+    const pct = Math.min(100, Math.round(done * 100));
+    $('n-work-title').textContent = 'waking up the smart reader…';
+    $('n-work-sub').textContent = `the very first time it downloads ~800 MB, wi-fi is best · ${pct}%`;
+    $('n-bar').style.width = `${pct}%`;
+    return;
+  }
   if (phase === 'load') {
     $('n-work-title').textContent = 'getting ready…';
     $('n-work-sub').textContent = 'the first time takes a little longer';
@@ -746,10 +1162,19 @@ async function preview() {
 let timer = 0;
 const schedulePreview = () => { clearTimeout(timer); timer = setTimeout(preview, 300); };
 
-function openEditor(md, empty) {
+const READER_NOTES = {
+  basic: "this browser can't run the smart reader (it needs Safari 26 or Chrome), so i used the quick one. check the words ♡",
+  offline: "the smart reader couldn't download right now, so i used the quick one this time. check the words ♡",
+  gpu: 'the smart reader got tired on this device, so i used the quick one. reload the page to give it another go ♡',
+};
+
+function openEditor(md, empty, notes = new Set()) {
   state.editing = true;
   text.value = md;
   $('n-empty').classList.toggle('hidden', !empty);
+  const note = [...notes].map((k) => READER_NOTES[k]).find(Boolean);
+  $('n-reader-note').textContent = note || '';
+  $('n-reader-note').classList.toggle('hidden', !note);
   renderThumbs();
   show('edit');
   preview();
@@ -758,19 +1183,23 @@ function openEditor(md, empty) {
 async function handleFiles(list, append) {
   const files = [...list].filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(f.name));
   if (!files.length) return fail("That doesn't look like a photo. Please pick a picture of your notes ♡");
+  state.retry = null;
   show('work');
   try {
-    const md = await readPages(files, setProgress);
+    const { md, notes } = await readPages(files, setProgress);
     if (!append) clearThumbs();
     files.forEach((f) => state.thumbs.push(URL.createObjectURL(f)));
     const before = append ? text.value.trim() : '';
     const found = md.trim();
-    openEditor(before && found ? `${before}\n\n${found}\n` : (before || md), !found);
+    openEditor(before && found ? `${before}\n\n${found}\n` : (before || md), !found, notes);
   } catch (e) {
     console.error(e);
+    if (e.message === 'smart-missing') state.retry = [files, append];
     fail(e.message === 'bad-image'
       ? "I couldn't open that photo. Try a JPG or PNG ♡"
-      : "The handwriting reader didn't load. Check your internet and try again ♡");
+      : e.message === 'smart-missing'
+        ? "The smart reader didn't finish downloading. Keep this page open (wi-fi is best) and try again, it picks up where it stopped ♡"
+        : "The handwriting reader didn't load. Check your internet and try again ♡");
   }
 }
 
@@ -830,10 +1259,10 @@ for (const input of [camera, files]) {
 $('n-camera-btn').addEventListener('click', () => { appendNext = false; camera.click(); });
 $('n-files-btn').addEventListener('click', () => { appendNext = false; files.click(); });
 $('n-add').addEventListener('click', () => { appendNext = true; files.click(); });
-$('n-type').addEventListener('click', () => { clearThumbs(); openEditor('', false); text.focus(); });
+$('n-type').addEventListener('click', () => { clearThumbs(); state.retry = null; openEditor('', false); text.focus(); });
 text.addEventListener('input', schedulePreview);
 $('n-shuffle').addEventListener('click', () => { state.seed = Math.floor(Math.random() * 1e9); preview(); });
 $('n-pdf').addEventListener('click', (e) => run(e.currentTarget, 'making your pdf…', buildPdf));
 $('n-zip').addEventListener('click', (e) => run(e.currentTarget, 'wrapping your zip 🎀', buildZip));
 $('n-again').addEventListener('click', () => { clearThumbs(); state.editing = false; text.value = ''; show('pick'); });
-$('n-retry').addEventListener('click', () => show(state.editing ? 'edit' : 'pick'));
+$('n-retry').addEventListener('click', () => (state.retry ? handleFiles(...state.retry) : show(state.editing ? 'edit' : 'pick')));
