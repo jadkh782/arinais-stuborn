@@ -1,7 +1,7 @@
 // arinais-stuborn — handwritten notes → cute PDF + Notion zip.
-// The handwriting (and maths) is read on the device by GLM-OCR on the GPU, with Tesseract.js as the
-// fallback; photos are never uploaded. Pages are laid out once, drawn on canvas (formulas via MathJax),
-// and saved with jsPDF / JSZip.
+// The handwriting (and maths) is read by GLM-OCR: on a computer on the device's GPU, on a phone by our
+// own Hugging Face Space (see hf-space/), with Tesseract.js as the last resort. Pages are laid out once,
+// drawn on canvas (formulas via MathJax), and saved with jsPDF / JSZip.
 
 const $ = (id) => document.getElementById(id);
 const views = ['pick', 'work', 'edit', 'error'];
@@ -165,7 +165,6 @@ const STALL_MS = 45000;
 let glmPromise = null;
 let glmReport = () => {};
 let glmBroken = false; // the GPU gave up; ONNX Runtime can't recover in the same page
-let glmLoadFails = 0;
 
 async function gpuAdapter() {
   try { return navigator.gpu ? await navigator.gpu.requestAdapter() : null; } catch { return null; }
@@ -332,43 +331,119 @@ async function glmPage({ T, processor, model }, src, onPart) {
   return out.join('\n\n');
 }
 
-// smart reader when the browser can run it, quick reader otherwise (or when the GPU gives up);
-// notes says which fallbacks happened, for a friendly line in the editor
+// reading server: the same GLM-OCR on our free Hugging Face Space (llama.cpp, see hf-space/), for phones,
+// whose tabs can't hold the 800 MB model, and for any device where the on-device reader can't run.
+// The Space naps after two days without use; the first request wakes it. Empty = no server yet, so
+// phones use Tesseract.
+const SERVER = '';
+const IS_PHONE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPads ask for the desktop site
+const WAKE_MS = 5 * 60000;
+const STRIP_MS = 4 * 60000;
+
+async function serverReady(onProgress) {
+  const until = Date.now() + WAKE_MS;
+  for (;;) {
+    try {
+      if ((await fetch(`${SERVER}/health`, { cache: 'no-store' })).ok) return;
+    } catch { /* asleep or starting: the waking page has no CORS headers */ }
+    if (Date.now() > until) throw new Error('server-asleep');
+    onProgress({ phase: 'wake' });
+    await new Promise((res) => setTimeout(res, 4000));
+  }
+}
+
+async function serverPage(src, onPart) {
+  const parts = strips(src);
+  const out = [];
+  for (let s = 0; s < parts.length; s++) {
+    const image = parts[s].toDataURL('image/jpeg', 0.88);
+    parts[s].width = parts[s].height = 0;
+    // no streaming, so the bar creeps while the server reads (~half a minute a strip on its CPU)
+    const t0 = Date.now();
+    const tick = setInterval(() => onPart((s + Math.min(0.9, (Date.now() - t0) / 40000)) / parts.length), 1000);
+    const stop = new AbortController();
+    const timeout = setTimeout(() => stop.abort(), STRIP_MS);
+    try {
+      onPart(s / parts.length);
+      const r = await fetch(`${SERVER}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: stop.signal,
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: image } }, { type: 'text', text: 'Text Recognition:' }] }],
+          temperature: 0,
+          max_tokens: 1024,
+        }),
+      });
+      if (!r.ok) throw new Error(`server-${r.status}`);
+      const text = tidy((await r.json()).choices?.[0]?.message?.content || '');
+      if (text) out.push(text);
+    } finally {
+      clearInterval(tick);
+      clearTimeout(timeout);
+    }
+  }
+  return out.join('\n\n');
+}
+
+// on-device reader on a computer that can run it, the reading server otherwise (or when the on-device
+// one fails), Tesseract when neither answers; notes says so, for a friendly line in the editor
 async function readPages(files, onProgress) {
   const notes = new Set();
+  let mode = 'tess';
   let reader = null;
-  if (glmBroken) notes.add('gpu');
-  else {
+  if (!IS_PHONE && !glmBroken) {
     glmReport = (done) => onProgress({ phase: 'download', done });
     onProgress({ phase: 'load' });
     try {
       reader = await getGlm();
-      glmLoadFails = 0;
+      mode = 'glm';
     } catch (e) {
-      if (e.message === 'no-webgpu') notes.add('basic');
-      else {
-        console.error(e);
-        if (++glmLoadFails < 2) throw new Error('smart-missing'); // most likely an interrupted download
-        notes.add('offline');
-      }
+      if (e.message !== 'no-webgpu') console.error(e); // e.g. an interrupted download: next scan resumes it
     }
   }
+  const toServer = async () => {
+    try {
+      await serverReady(onProgress);
+      return 'server';
+    } catch (e) {
+      console.error(e);
+      notes.add('offline');
+      return 'tess';
+    }
+  };
+  if (mode !== 'glm' && SERVER) mode = await toServer();
+  else if (mode !== 'glm') notes.add(IS_PHONE ? 'phone' : 'basic');
   const out = [];
   try {
     for (let i = 0; i < files.length; i++) {
       const src = await loadImage(files[i]);
+      const part = (f) => onProgress({ phase: 'read', done: i + f, total: files.length });
       try {
-        if (reader) {
+        if (mode === 'glm') {
           try {
-            onProgress({ phase: 'read', done: i, total: files.length });
-            out.push(await glmPage(reader, src, (f) => onProgress({ phase: 'read', done: i + f, total: files.length })));
+            part(0);
+            out.push(await glmPage(reader, src, part));
             continue;
           } catch (e) {
             console.error(e);
             glmBroken = true;
             reader = null;
             glmPromise = null;
-            notes.add('gpu');
+            if (SERVER) mode = await toServer();
+            else { mode = 'tess'; notes.add('basic'); }
+          }
+        }
+        if (mode === 'server') {
+          try {
+            part(0);
+            out.push(await serverPage(src, part));
+            continue;
+          } catch (e) {
+            console.error(e);
+            notes.add('offline');
+            mode = 'tess';
           }
         }
         out.push(await tessPage(src, i, files.length, onProgress));
@@ -1120,7 +1195,7 @@ async function buildZip(md) {
 }
 
 // ---------- 7. UI ----------
-const state = { theme: 'strawberry', font: 'caveat', seed: Math.floor(Math.random() * 1e9), thumbs: [], editing: false, retry: null };
+const state = { theme: 'strawberry', font: 'caveat', seed: Math.floor(Math.random() * 1e9), thumbs: [], editing: false };
 const text = $('n-text');
 
 function setProgress({ phase, done = 0, total = 1 }) {
@@ -1129,6 +1204,12 @@ function setProgress({ phase, done = 0, total = 1 }) {
     $('n-work-title').textContent = 'waking up the smart reader…';
     $('n-work-sub').textContent = `the very first time it downloads ~800 MB, wi-fi is best · ${pct}%`;
     $('n-bar').style.width = `${pct}%`;
+    return;
+  }
+  if (phase === 'wake') {
+    $('n-work-title').textContent = 'waking up the reading server…';
+    $('n-work-sub').textContent = "it naps when nobody's using it, so this can take a minute or two";
+    $('n-bar').style.width = '6%';
     return;
   }
   if (phase === 'load') {
@@ -1189,9 +1270,9 @@ let timer = 0;
 const schedulePreview = () => { clearTimeout(timer); timer = setTimeout(preview, 300); };
 
 const READER_NOTES = {
-  basic: "this browser can't run the smart reader (it needs Safari 26 or Chrome), so i used the quick one. check the words ♡",
-  offline: "the smart reader couldn't download right now, so i used the quick one this time. check the words ♡",
-  gpu: 'the smart reader got tired on this device, so i used the quick one. reload the page to give it another go ♡',
+  phone: 'on a phone i use the quick reader for now, so check the words. for formulas, scan on your laptop ♡',
+  basic: "the smart reader couldn't run in this browser this time, so i used the quick one. check the words ♡",
+  offline: "the smart reader didn't answer this time (check your internet), so i used the quick one. check the words ♡",
 };
 
 function openEditor(md, empty, notes = new Set()) {
@@ -1209,7 +1290,6 @@ function openEditor(md, empty, notes = new Set()) {
 async function handleFiles(list, append) {
   const files = [...list].filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(f.name));
   if (!files.length) return fail("That doesn't look like a photo. Please pick a picture of your notes ♡");
-  state.retry = null;
   show('work');
   try {
     const { md, notes } = await readPages(files, setProgress);
@@ -1220,12 +1300,9 @@ async function handleFiles(list, append) {
     openEditor(before && found ? `${before}\n\n${found}\n` : (before || md), !found, notes);
   } catch (e) {
     console.error(e);
-    if (e.message === 'smart-missing') state.retry = [files, append];
     fail(e.message === 'bad-image'
       ? "I couldn't open that photo. Try a JPG or PNG ♡"
-      : e.message === 'smart-missing'
-        ? "The smart reader didn't finish downloading. Keep this page open (wi-fi is best) and try again, it picks up where it stopped ♡"
-        : "The handwriting reader didn't load. Check your internet and try again ♡");
+      : "The handwriting reader didn't load. Check your internet and try again ♡");
   }
 }
 
@@ -1285,10 +1362,10 @@ for (const input of [camera, files]) {
 $('n-camera-btn').addEventListener('click', () => { appendNext = false; camera.click(); });
 $('n-files-btn').addEventListener('click', () => { appendNext = false; files.click(); });
 $('n-add').addEventListener('click', () => { appendNext = true; files.click(); });
-$('n-type').addEventListener('click', () => { clearThumbs(); state.retry = null; openEditor('', false); text.focus(); });
+$('n-type').addEventListener('click', () => { clearThumbs(); openEditor('', false); text.focus(); });
 text.addEventListener('input', schedulePreview);
 $('n-shuffle').addEventListener('click', () => { state.seed = Math.floor(Math.random() * 1e9); preview(); });
 $('n-pdf').addEventListener('click', (e) => run(e.currentTarget, 'making your pdf…', buildPdf));
 $('n-zip').addEventListener('click', (e) => run(e.currentTarget, 'wrapping your zip 🎀', buildZip));
 $('n-again').addEventListener('click', () => { clearThumbs(); state.editing = false; text.value = ''; show('pick'); });
-$('n-retry').addEventListener('click', () => (state.retry ? handleFiles(...state.retry) : show(state.editing ? 'edit' : 'pick')));
+$('n-retry').addEventListener('click', () => show(state.editing ? 'edit' : 'pick'));
