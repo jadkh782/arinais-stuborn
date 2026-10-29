@@ -331,11 +331,10 @@ async function glmPage({ T, processor, model }, src, onPart) {
   return out.join('\n\n');
 }
 
-// reading server: the same GLM-OCR on our free Hugging Face Space (llama.cpp, see hf-space/), for phones,
-// whose tabs can't hold the 800 MB model, and for any device where the on-device reader can't run.
-// The Space naps after two days without use; the first request wakes it. Empty = no server yet, so
-// phones use Tesseract.
-const SERVER = '';
+// reading server: the same GLM-OCR behind llama.cpp on Modal (see modal-reader/), for phones, whose tabs
+// can't hold the 800 MB model, and for any device where the on-device reader can't run. It sleeps when
+// idle and wakes on the first request (~15 s). Empty = no server, so phones use Tesseract.
+const SERVER = 'https://jadkh782--arinais-reader-serve.us-east.modal.run';
 const IS_PHONE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPads ask for the desktop site
 const WAKE_MS = 5 * 60000;
@@ -359,9 +358,9 @@ async function serverPage(src, onPart) {
   for (let s = 0; s < parts.length; s++) {
     const image = parts[s].toDataURL('image/jpeg', 0.88);
     parts[s].width = parts[s].height = 0;
-    // no streaming, so the bar creeps while the server reads (~half a minute a strip on its CPU)
+    // no streaming, so the bar creeps while the server reads (a few seconds a strip)
     const t0 = Date.now();
-    const tick = setInterval(() => onPart((s + Math.min(0.9, (Date.now() - t0) / 40000)) / parts.length), 1000);
+    const tick = setInterval(() => onPart((s + Math.min(0.9, (Date.now() - t0) / 8000)) / parts.length), 500);
     const stop = new AbortController();
     const timeout = setTimeout(() => stop.abort(), STRIP_MS);
     try {
@@ -1208,7 +1207,7 @@ function setProgress({ phase, done = 0, total = 1 }) {
   }
   if (phase === 'wake') {
     $('n-work-title').textContent = 'waking up the reading server…';
-    $('n-work-sub').textContent = "it naps when nobody's using it, so this can take a minute or two";
+    $('n-work-sub').textContent = "it naps when nobody's using it, this takes a few seconds";
     $('n-bar').style.width = '6%';
     return;
   }

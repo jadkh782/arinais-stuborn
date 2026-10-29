@@ -22,8 +22,8 @@ Everything runs in the browser: no AI, no server, and the PDF never leaves the v
 1. **Scan or pick** photos of handwritten notes (the camera button opens the phone camera), or just type.
 2. The handwriting **and maths** are read by [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) (0.9B, MIT). Formulas come back as LaTeX (`$…$` / `$$…$$`). Each photo is scaled to 1000 px wide and read in strips of ≤ 0.4 MP, cut at the emptiest rows (blank strips are skipped), which keeps memory small and each step short.
    - **Computers: on the device.** GPU via [Transformers.js](https://huggingface.co/docs/transformers.js) 4 + WebGPU (`onnx-community/GLM-OCR-ONNX`, 4-bit). The model (~800 MB) comes from Hugging Face's CDN the first time and is cached by the browser; it's freed after each scan and reloads from the cache. A download that gets no bytes for 45 s counts as failed; the next scan resumes it. (It can't live on Vercel: Hobby uploads are capped at 100 MB per file and functions have no GPU.)
-   - **Phones** can't hold the model (iOS Safari kills the tab), so they never load it. When `SERVER` in `notes.js` is set, phones (and computers without WebGPU, or whose on-device reader fails) send the strips to a reading server instead: the same model behind llama.cpp's OpenAI-compatible API (`POST /v1/chat/completions`, `GET /health`); `hf-space/` holds a Docker setup for one. The page waits up to 5 minutes for a sleeping server to wake. No server is set yet (a Docker Space now needs Hugging Face PRO).
-   - **Otherwise:** [Tesseract.js](https://tesseract.projectnaptha.com/) 5 (English + German, text only). A note in the editor says why.
+   - **Phones: the reading server.** A phone tab can't hold the model (iOS Safari kills the tab), so phones (and computers without WebGPU, or whose on-device reader fails) send the strips to `SERVER` in `notes.js`: the same model (`ggml-org/GLM-OCR-GGUF` Q8_0) behind llama.cpp's OpenAI-compatible API on [Modal](https://modal.com), see `modal-reader/app.py`. 8 CPU cores, a few seconds a strip; it scales to zero when idle and wakes in ~15 s (the page waits up to 5 min). At most one container runs. Nothing is stored. Runs on Modal's monthly free credits; the account has no payment method, so it can't bill. Redeploy with `python -m modal deploy modal-reader/app.py`.
+   - **Last resort:** [Tesseract.js](https://tesseract.projectnaptha.com/) 5 (English + German, text only) when the server doesn't answer. A note in the editor says so.
 3. She fixes anything it misread in a small markdown editor: `# title`, `## heading`, `- bullet`, `1. number`, `[ ] to-do`, `> sticky note`, `**highlight**`, `$x^2$`, `$$ formula $$` (a line that is a single `$…$` formula counts as a block).
 4. She picks a paper (strawberry milk, lavender dream, peach blossom) and a handwriting font (Caveat, Gaegu, Patrick Hand). A live preview shows the A4 pages, with washi tape, doodles, a motivational sticker and a footer on each one. Formulas are typeset by [MathJax](https://www.mathjax.org/) 3 (loaded only when there is maths); its SVG paths are drawn straight onto the canvas in the ink colour, block formulas on a soft card.
 5. Downloads:
@@ -45,7 +45,7 @@ public/              ← the website (static, no build step)
 tests/
   harness.html       ← runs the converter on tests/…/sample.pdf
   run_harness.py     ← headless-Chrome test: python tests/run_harness.py slides.pdf out/
-hf-space/            ← the reading server for phones (Hugging Face Docker Space: llama.cpp + GLM-OCR)
+modal-reader/app.py  ← the reading server for phones (Modal: llama.cpp + GLM-OCR)
 vercel.json          ← static hosting config (serves public/)
 ```
 
