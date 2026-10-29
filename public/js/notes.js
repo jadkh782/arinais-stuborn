@@ -161,6 +161,7 @@ const GLM = 'onnx-community/GLM-OCR-ONNX';
 const GLM_BYTES = 7.8e8; // download size, so the progress bar doesn't jump back as files start
 const PAGE_W = 1000; // photos are scaled to this width…
 const STRIP_PX = 4e5; // …and read in strips of at most this many pixels, which keeps GPU memory small
+const STALL_MS = 45000;
 let glmPromise = null;
 let glmReport = () => {};
 let glmBroken = false; // the GPU gave up; ONNX Runtime can't recover in the same page
@@ -178,22 +179,47 @@ function getGlm() {
       const T = await import(TJS);
       T.env.allowLocalModels = false;
       const seen = {};
+      let last = Date.now();
       const progress_callback = (p) => {
-        if (p.status !== 'progress' || !p.total) return;
+        if (!p.file || !(p.status === 'progress' || p.status === 'done')) return;
+        last = Date.now();
+        if (p.status === 'done') { if (seen[p.file]) seen[p.file][0] = seen[p.file][1]; return; }
+        if (!p.total) return;
         seen[p.file] = [p.loaded, p.total];
         const v = Object.values(seen);
         glmReport(v.reduce((a, [l]) => a + l, 0) / Math.max(GLM_BYTES, v.reduce((a, [, n]) => a + n, 0)));
       };
-      const processor = await T.AutoProcessor.from_pretrained(GLM, { progress_callback });
-      // 4-bit vision encoder + decoder; the 4-bit embeddings don't load, so fp16 ones where the GPU has fp16
-      const dtype = adapter.features.has('shader-f16')
-        ? { embed_tokens: 'fp16', vision_encoder: 'q4f16', decoder_model_merged: 'q4f16' }
-        : { embed_tokens: 'quantized', vision_encoder: 'q4', decoder_model_merged: 'q4' };
-      const model = await T.AutoModelForImageTextToText.from_pretrained(GLM, {
-        device: 'webgpu', dtype, use_external_data_format: true, progress_callback,
+      const load = (async () => {
+        const processor = await T.AutoProcessor.from_pretrained(GLM, { progress_callback });
+        // 4-bit vision encoder + decoder; the 4-bit embeddings don't load, so fp16 ones where the GPU has fp16
+        const dtype = adapter.features.has('shader-f16')
+          ? { embed_tokens: 'fp16', vision_encoder: 'q4f16', decoder_model_merged: 'q4f16' }
+          : { embed_tokens: 'quantized', vision_encoder: 'q4', decoder_model_merged: 'q4' };
+        const model = await T.AutoModelForImageTextToText.from_pretrained(GLM, {
+          device: 'webgpu', dtype, use_external_data_format: true, progress_callback,
+        });
+        navigator.storage?.persist?.().catch(() => {}); // ask the browser to keep the cached model
+        return { T, processor, model };
+      })();
+      load.catch(() => {});
+      // a download that dies mid-file can leave Transformers.js waiting forever, so a file that gets no
+      // bytes for STALL_MS counts as failed (files that finished are cached, so a retry only fetches the rest)
+      const wake = () => { last = Date.now(); }; // phones pause hidden tabs; don't count that time
+      document.addEventListener('visibilitychange', wake);
+      let timer = 0;
+      const stalled = new Promise((_, reject) => {
+        timer = setInterval(() => {
+          if (document.hidden) return wake();
+          const busy = Object.values(seen).some(([l, n]) => l < n);
+          if (busy && Date.now() - last > STALL_MS) reject(new Error('download-stalled'));
+        }, 3000);
       });
-      navigator.storage?.persist?.().catch(() => {}); // ask the browser to keep the cached model
-      return { T, processor, model };
+      try {
+        return await Promise.race([load, stalled]);
+      } finally {
+        clearInterval(timer);
+        document.removeEventListener('visibilitychange', wake);
+      }
     })().catch((e) => { glmPromise = null; throw e; });
   }
   return glmPromise;
